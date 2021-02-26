@@ -10,6 +10,7 @@ requests = "*"
 [dev-packages]
 yapf = "*"
 pylint = "*"
+isort = "*"
 
 [requires]
 python_version = "3.9"
