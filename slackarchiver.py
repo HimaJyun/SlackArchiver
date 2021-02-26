@@ -1,3 +1,4 @@
+import argparse
 import dataclasses
 import datetime
 import json
@@ -6,7 +7,7 @@ import random
 import shutil
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 import slack_sdk
@@ -72,8 +73,17 @@ def get_splitter(value: str) -> Callable[[datetime], str]:
         raise ValueError(f"{value} is invalid error")
 
 
-def file_download(url: str, path: os.PathLike):
-    res = requests.get(url=url,
+def file_download(dir_path: os.PathLike, file: FileObject):
+    name = file.id
+    ext = file.name.split(".", 1)
+    if len(ext) == 2:
+        name += "." + ext[1]
+    path = os.path.join(dir_path, name)
+    # 既にあれば何もしない
+    if os.path.exists(path):
+        return
+
+    res = requests.get(url=file.url,
                        allow_redirects=True,
                        stream=True,
                        headers={"Authorization": "Bearer " + slack.token})
@@ -112,7 +122,7 @@ def msg_parser(obj: dict) -> MessageObject:
     f = []
     for v in obj.get("files", []):
         if "url_private_download" not in v:
-            raise ValueError("Unknown files")
+            continue
         f.append(
             FileObject(id=v["id"],
                        name=v["name"],
@@ -130,15 +140,6 @@ def message_write(path: os.PathLike, messages: list[MessageObject]):
     os.makedirs(path, exist_ok=True)
     # 古い順でソートし直す
     messages.sort(key=lambda m: m.time)
-
-    def download(file: FileObject):
-        i = file.id
-        s = file.name.split(".", 1)
-        if len(s) != 1:
-            i += "." + s[1]
-        p = os.path.join(path, i)
-        if not os.path.exists(p):
-            file_download(file.url, p)
 
     def build_str(obj: MessageObject) -> list[str]:
         l = []
@@ -158,10 +159,10 @@ def message_write(path: os.PathLike, messages: list[MessageObject]):
     # まず最初にファイルをダウンロード
     for m in messages:
         for f in m.files:
-            download(f)
+            file_download(path, f)
         for t in m.thread:
             for f in t.files:
-                download(f)
+                file_download(path, f)
 
     # 整形しながら出力
     with open(os.path.join(path, "_log.txt"), mode="a", encoding="utf-8") as f:
@@ -229,21 +230,119 @@ def archive(channel: str, out: os.PathLike, before: datetime,
     if len(messages) != 0:
         message_write(path, messages)
 
-    with open(os.path.join(out,
-                           "raw-{0:%Y%m%d-%H%M%S}.json".format(datetime.now())),
+    with open(os.path.join(
+            out, "history-{0:%Y%m%d-%H%M%S}.json".format(datetime.now())),
               mode="x",
               encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=4)
 
 
+def unused(out: os.PathLike, before: datetime, splitter: Callable[[datetime],
+                                                                  str]):
+    def download(file: dict):
+        split = splitter(datetime.fromtimestamp(file["created"], tz=local_zone))
+        path = os.path.join(out, split)
+        os.makedirs(path, exist_ok=True)
+        file_download(
+            path,
+            FileObject(id=file["id"],
+                       name=file["name"],
+                       title=file["title"],
+                       url=file["url_private_download"]))
+
+    files = []
+    page = 1
+    ts = str(int(before.timestamp()))
+    while True:
+        res = limit_call(lambda: slack.files_list(ts_to=ts, page=str(page)))
+        if not res.get("ok", False):
+            raise ValueError("responce is not ok")
+        # 使われてないファイルを探す
+        for f in res["files"]:
+            if "url_private_download" not in f:
+                continue
+            elif bool(f["channels"]) or bool(f["groups"]) or bool(f["ims"]):
+                continue
+            else:
+                files.append(f)
+                download(f)
+        # ページング
+        page += 1
+        if page > res["paging"]["pages"]:
+            break
+
+    with open(os.path.join(
+            out, "unused-{0:%Y%m%d-%H%M%S}.json".format(datetime.now())),
+              mode="x",
+              encoding="utf-8") as f:
+        json.dump({"files": files}, f, ensure_ascii=False, indent=4)
+
+
 def main():
     global slack
-    slack = slack_sdk.WebClient(token=os.environ["SLACK_TOKEN"])
-    archive(channel="TODO",
-            out="./TODO",
-            before=datetime.now(),
-            splitter=get_splitter("all"))
 
+    def before(days: int) -> datetime:
+        return datetime.now() - timedelta(days=days)
+
+    parser = argparse.ArgumentParser(description="Slack archiver")
+    parser.add_argument("-t", "--token", help="Slack API Token")
+    sub_parser = parser.add_subparsers()
+
+    sub = sub_parser.add_parser("archive", help="archive old chat history")
+    sub.add_argument("-o",
+                     "--out",
+                     type=str,
+                     default="./history",
+                     help="Output directory")
+    sub.add_argument("-b",
+                     "--before",
+                     type=int,
+                     default=0,
+                     help="Archive data older than the specified days")
+    sub.add_argument("-s",
+                     "--split",
+                     type=str,
+                     default="month",
+                     choices=["day", "month", "year", "all"],
+                     help="Period to split the directory")
+    sub.add_argument("channel", type=str,help="channel id")
+    sub.set_defaults(func=lambda a: archive(channel=a.channel,
+                                            out=a.out,
+                                            before=before(a.before),
+                                            splitter=get_splitter(a.split)))
+
+    sub = sub_parser.add_parser("unused", help="archive unused files")
+    sub.add_argument("-o",
+                     "--out",
+                     type=str,
+                     default="./unused",
+                     help="Output directory")
+    sub.add_argument("-b",
+                     "--before",
+                     type=int,
+                     default=0,
+                     help="Archive data older than the specified days")
+    sub.add_argument("-s",
+                     "--split",
+                     type=str,
+                     default="month",
+                     choices=["day", "month", "year", "all"],
+                     help="Period to split the directory")
+    sub.set_defaults(func=lambda a: unused(
+        out=a.out, before=before(a.before), splitter=get_splitter(a.split)))
+
+    args = parser.parse_args()
+    if args.token is not None:
+        slack = slack_sdk.WebClient(token=args.token)
+    elif os.getenv("SLACK_TOKEN") is not None:
+        slack = slack_sdk.WebClient(token=os.getenv("SLACK_TOKEN"))
+    else:
+        slack = slack_sdk.WebClient(token=input("Slack API Token> "))
+
+    if hasattr(args,"func"):
+        args.func(args)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__":
     main()
