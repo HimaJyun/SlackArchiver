@@ -47,13 +47,17 @@ def limit_call(func: callable) -> slack_sdk.web.SlackResponse:
                 raise e
 
 
+def assert_ok(responce: slack_sdk.web.SlackResponse):
+    if not responce.get("ok", False):
+        raise ValueError("responce is not ok")
+
+
 def user_name(user: str) -> str:
     if user in user_cache:
         return user_cache[user]
 
     u = limit_call(lambda: slack.users_info(user=user))
-    if not u.get("ok", False):
-        raise ValueError("responce is not ok")
+    assert_ok(u)
 
     v = u["user"]["real_name"]
     user_cache[user] = v
@@ -101,8 +105,7 @@ def cursor_pagination(first: callable,
     v = limit_call(first)
     # SlackResponce
     while True:
-        if not v.get("ok", False):
-            raise ValueError("responce is not ok")
+        assert_ok(v)
         if yield_from:
             yield from mapper(v)
         else:
@@ -190,7 +193,7 @@ def archive(channel: str, out: os.PathLike, before: datetime,
             lambda c: slack.conversations_replies(
                 channel=channel, ts=ts, cursor=c))
 
-    raw = {"messages": [], "threads": {}}
+    raw = {"channel": channel, "messages": [], "threads": {}}
 
     split: str = None
     path: os.PathLike = None
@@ -255,8 +258,7 @@ def unused(out: os.PathLike, before: datetime, splitter: Callable[[datetime],
     ts = str(int(before.timestamp()))
     while True:
         res = limit_call(lambda: slack.files_list(ts_to=ts, page=str(page)))
-        if not res.get("ok", False):
-            raise ValueError("responce is not ok")
+        assert_ok(res)
         # 使われてないファイルを探す
         for f in res["files"]:
             if "url_private_download" not in f:
@@ -278,6 +280,63 @@ def unused(out: os.PathLike, before: datetime, splitter: Callable[[datetime],
         json.dump({"files": files}, f, ensure_ascii=False, indent=4)
 
 
+def clean(file: os.PathLike, run: bool):
+    data = {}
+    with open(file, mode="r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    channel: str = data.get("channel")
+
+    def file_delete(f_id: str):
+        if not run:
+            return
+        res = limit_call(lambda: slack.files_delete(file=f_id))
+        assert_ok(res)
+
+    def chat_delete(chat: dict):
+        if chat["type"] != "message":
+            raise TypeError('"type" is not "message"')
+        if run:
+            res = limit_call(
+                lambda: slack.chat_delete(channel=channel, ts=chat["ts"]))
+            assert_ok(res)
+
+        # 先にチャットを消さないと使用判定が上手く行かない
+        for f in chat.get("files", []):
+            if "url_private_download" not in f:
+                continue
+            f_id = f["id"]
+            if run:
+                # 使われていないか確認
+                res = limit_call(lambda: slack.files_info(file=f_id))
+                assert_ok(res)
+                f_i = res["file"]
+                if bool(f_i["channels"]) or bool(f_i["groups"]) or bool(
+                        f_i["ims"]):
+                    continue
+
+            print(f"delete file: {f_id}")
+            file_delete(f_id)
+
+    for tt, tv in data.get("threads", {}).items():
+        for t in tv:
+            t_ts: str = t["ts"]
+            print(f"delete chat: {channel} {tt} {t_ts}")
+            chat_delete(t)
+
+    for m in data.get("messages", []):
+        m_ts: str = m["ts"]
+        print(f"delete chat: {channel} {m_ts}")
+        chat_delete(m)
+
+    for f in data.get("files", []):
+        if "url_private_download" not in f:
+            continue
+        f_id = f["id"]
+        print(f"delete file: {f_id}")
+        file_delete(f_id)
+
+
 def main():
     global slack
 
@@ -288,7 +347,7 @@ def main():
     parser.add_argument("-t", "--token", help="Slack API Token")
     sub_parser = parser.add_subparsers()
 
-    sub = sub_parser.add_parser("archive", help="archive old chat history")
+    sub = sub_parser.add_parser("archive", help="archive posts")
     sub.add_argument("-o",
                      "--out",
                      type=str,
@@ -305,7 +364,7 @@ def main():
                      default="month",
                      choices=["day", "month", "year", "all"],
                      help="Period to split the directory")
-    sub.add_argument("channel", type=str,help="channel id")
+    sub.add_argument("channel", type=str, help="channel id")
     sub.set_defaults(func=lambda a: archive(channel=a.channel,
                                             out=a.out,
                                             before=before(a.before),
@@ -331,6 +390,16 @@ def main():
     sub.set_defaults(func=lambda a: unused(
         out=a.out, before=before(a.before), splitter=get_splitter(a.split)))
 
+    sub = sub_parser.add_parser("clean", help="delete post")
+    sub.add_argument("--summer-bugs-entering-the-fire",
+                     action="store_true",
+                     help="If specified, the operation will be executed." +
+                     " Deleted posts cannot be restored." +
+                     " ACCEPTED ALL RISKS!!")
+    sub.add_argument("file", type=str, help="archive json file")
+    sub.set_defaults(
+        func=lambda a: clean(file=a.file, run=a.summer_bugs_entering_the_fire))
+
     args = parser.parse_args()
     if args.token is not None:
         slack = slack_sdk.WebClient(token=args.token)
@@ -339,10 +408,16 @@ def main():
     else:
         slack = slack_sdk.WebClient(token=input("Slack API Token> "))
 
-    if hasattr(args,"func"):
+    # APIレベルで無効化しておく
+    if hasattr(args, "summer_bugs_entering_the_fire"
+              ) and not args.summer_bugs_entering_the_fire:
+        slack = None
+
+    if hasattr(args, "func"):
         args.func(args)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
