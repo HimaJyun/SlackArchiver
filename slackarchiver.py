@@ -280,7 +280,10 @@ def unused(out: os.PathLike, before: datetime, splitter: Callable[[datetime],
         json.dump({"files": files}, f, ensure_ascii=False, indent=4)
 
 
-def clean(file: os.PathLike, run: bool):
+def clean(file: os.PathLike,
+          run: bool,
+          only_files: bool = False,
+          ignore_use: bool = False):
     data = {}
     with open(file, mode="r", encoding="utf-8") as f:
         data = json.load(f)
@@ -296,7 +299,7 @@ def clean(file: os.PathLike, run: bool):
     def chat_delete(chat: dict):
         if chat["type"] != "message":
             raise TypeError('"type" is not "message"')
-        if run:
+        if run and not only_files:
             res = limit_call(
                 lambda: slack.chat_delete(channel=channel, ts=chat["ts"]))
             assert_ok(res)
@@ -306,7 +309,7 @@ def clean(file: os.PathLike, run: bool):
             if "url_private_download" not in f:
                 continue
             f_id = f["id"]
-            if run:
+            if not ignore_use:
                 # 使われていないか確認
                 res = limit_call(lambda: slack.files_info(file=f_id))
                 assert_ok(res)
@@ -321,12 +324,14 @@ def clean(file: os.PathLike, run: bool):
     for tt, tv in data.get("threads", {}).items():
         for t in tv:
             t_ts: str = t["ts"]
-            print(f"delete chat: {channel} {tt} {t_ts}")
+            if not only_files:
+                print(f"delete chat: {channel} {tt} {t_ts}")
             chat_delete(t)
 
     for m in data.get("messages", []):
         m_ts: str = m["ts"]
-        print(f"delete chat: {channel} {m_ts}")
+        if not only_files:
+            print(f"delete chat: {channel} {m_ts}")
         chat_delete(m)
 
     for f in data.get("files", []):
@@ -391,6 +396,15 @@ def main():
         out=a.out, before=before(a.before), splitter=get_splitter(a.split)))
 
     sub = sub_parser.add_parser("clean", help="delete post")
+    sub.add_argument(
+        "-f",
+        "--only-files",
+        action="store_true",
+        help="only file deleting. If specified, --ignore-use is also enabled.")
+    sub.add_argument("-i",
+                     "--ignore-use",
+                     action="store_true",
+                     help="delete even files that are in use")
     sub.add_argument("--summer-bugs-entering-the-fire",
                      action="store_true",
                      help="If specified, the operation will be executed." +
@@ -398,7 +412,10 @@ def main():
                      " ACCEPTED ALL RISKS!!")
     sub.add_argument("file", type=str, help="archive json file")
     sub.set_defaults(
-        func=lambda a: clean(file=a.file, run=a.summer_bugs_entering_the_fire))
+        func=lambda a: clean(file=a.file,
+                             run=a.summer_bugs_entering_the_fire,
+                             only_files=a.only_files,
+                             ignore_use=(a.ignore_use or a.only_files)))
 
     args = parser.parse_args()
     if args.token is not None:
