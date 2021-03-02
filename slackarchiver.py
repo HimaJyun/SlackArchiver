@@ -293,8 +293,17 @@ def clean(file: os.PathLike,
     def file_delete(f_id: str):
         if not run:
             return
-        res = limit_call(lambda: slack.files_delete(file=f_id))
-        assert_ok(res)
+        try:
+            res = limit_call(lambda: slack.files_delete(file=f_id))
+            assert_ok(res)
+            print(f"delete file: {f_id}")
+        except slack_sdk.errors.SlackApiError as e:
+            if e.response["error"] == "file_not_found" or e.response[
+                    "error"] == "file_deleted":
+                print(f"not found: {f_id}")
+                return
+            else:
+                raise e
 
     def chat_delete(chat: dict):
         if chat["type"] != "message":
@@ -317,8 +326,6 @@ def clean(file: os.PathLike,
                 if bool(f_i["channels"]) or bool(f_i["groups"]) or bool(
                         f_i["ims"]):
                     continue
-
-            print(f"delete file: {f_id}")
             file_delete(f_id)
 
     for tt, tv in data.get("threads", {}).items():
@@ -337,9 +344,7 @@ def clean(file: os.PathLike,
     for f in data.get("files", []):
         if "url_private_download" not in f:
             continue
-        f_id = f["id"]
-        print(f"delete file: {f_id}")
-        file_delete(f_id)
+        file_delete(f["id"])
 
 
 def main():
