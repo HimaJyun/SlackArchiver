@@ -309,8 +309,16 @@ def clean(file: os.PathLike,
         if chat["type"] != "message":
             raise TypeError('"type" is not "message"')
         if run and not only_files:
-            res = limit_call(
-                lambda: slack.chat_delete(channel=channel, ts=chat["ts"]))
+            try:
+                res = limit_call(
+                    lambda: slack.chat_delete(channel=channel, ts=chat["ts"]))
+            except slack_sdk.errors.SlackApiError as e:
+                if e.response["error"] == "message_not_found":
+                    ts = chat["ts"]
+                    print(f"not found: {ts}")
+                    return
+                else:
+                    raise e
             assert_ok(res)
 
         # 先にチャットを消さないと使用判定が上手く行かない
@@ -318,9 +326,16 @@ def clean(file: os.PathLike,
             if "url_private_download" not in f:
                 continue
             f_id = f["id"]
-            if not ignore_use:
+            if run and not ignore_use:
                 # 使われていないか確認
-                res = limit_call(lambda: slack.files_info(file=f_id))
+                try:
+                    res = limit_call(lambda: slack.files_info(file=f_id))
+                except slack_sdk.errors.SlackApiError as e:
+                    if e.response["error"] == "file_not_found":
+                        print(f"not found: {f_id}")
+                        return
+                    else:
+                        raise e
                 assert_ok(res)
                 f_i = res["file"]
                 if bool(f_i["channels"]) or bool(f_i["groups"]) or bool(
