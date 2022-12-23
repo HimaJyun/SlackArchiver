@@ -40,6 +40,9 @@ def limit_call(func: callable) -> slack_sdk.web.SlackResponse:
         try:
             ret = func()
             return ret
+        except ConnectionResetError as e2:
+            print("connection error")
+            raise e2
         except slack_sdk.errors.SlackApiError as e:
             if e.response["error"] == "ratelimited":
                 time.sleep(1 + int(e.response.headers["Retry-After"]))
