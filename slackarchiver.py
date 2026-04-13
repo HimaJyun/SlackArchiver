@@ -82,9 +82,7 @@ def get_splitter(value: str) -> Callable[[datetime], str]:
 
 def file_download(dir_path: os.PathLike, file: FileObject):
     name = file.id
-    ext = file.name.split(".", 1)
-    if len(ext) == 2:
-        name += "." + ext[1]
+    name += os.path.splitext(file.name)[1]
     path = os.path.join(dir_path, name)
     # 既にあれば何もしない
     if os.path.exists(path):
